@@ -1,0 +1,12 @@
+﻿# Python
+__pycache__/
+*.pyc
+
+# Local artifacts
+input/~$*
+~$*.xlsx
+
+# Editor
+.cursor/
+.vscode/
+
