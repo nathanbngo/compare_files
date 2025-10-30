@@ -41,6 +41,7 @@ def compare_rows_fast(
     df2: pd.DataFrame,
     id_col1: str,
     id_col2: str,
+    assume_sorted: bool = False,
 ) -> Tuple[Dict[str, List[str]], Dict[str, List[str]], Set[str], Set[str], List[str]]:
     print("Comparing rows by SEC_ID (stream-fast)...")
     start_ts = time.perf_counter()
@@ -62,13 +63,17 @@ def compare_rows_fast(
     ids1 = df1[id_col1].to_numpy()
     ids2 = df2[id_col2].to_numpy()
 
-    if not (_is_sorted(df1[id_col1]) and _is_sorted(df2[id_col2])):
+    if not assume_sorted and not (_is_sorted(df1[id_col1]) and _is_sorted(df2[id_col2])):
         print("Warning: SEC_IDs not detected as ascending in one or both files; sorting for fast path...")
-        # Sort both frames by SEC_ID to enable fast path
-        df1 = df1.sort_values(by=id_col1, kind="stable").reset_index(drop=True)
-        df2 = df2.sort_values(by=id_col2, kind="stable").reset_index(drop=True)
+        # Sort both frames by SEC_ID numerically to enable fast path
+        df1 = df1.assign(_sec_id_num=pd.to_numeric(df1[id_col1].astype(str).str.strip(), errors="coerce")).sort_values(by="_sec_id_num", kind="stable").drop(columns=["_sec_id_num"]).reset_index(drop=True)
+        df2 = df2.assign(_sec_id_num=pd.to_numeric(df2[id_col2].astype(str).str.strip(), errors="coerce")).sort_values(by="_sec_id_num", kind="stable").drop(columns=["_sec_id_num"]).reset_index(drop=True)
         ids1 = df1[id_col1].to_numpy()
         ids2 = df2[id_col2].to_numpy()
+
+    # Use numeric arrays for ordering comparisons
+    ids1_num = pd.to_numeric(pd.Series(ids1, dtype=str).str.strip(), errors="coerce").to_numpy()
+    ids2_num = pd.to_numeric(pd.Series(ids2, dtype=str).str.strip(), errors="coerce").to_numpy()
 
     only_in_1: Set[str] = set()
     only_in_2: Set[str] = set()
@@ -82,7 +87,9 @@ def compare_rows_fast(
     while i < len1 and j < len2:
         id1 = ids1[i]
         id2 = ids2[j]
-        if id1 == id2:
+        n1 = ids1_num[i]
+        n2 = ids2_num[j]
+        if n1 == n2:
             # Per-row comparison to avoid building huge 2D string arrays in memory
             s1 = df1.iloc[i][comparable_cols]
             s2 = df2.iloc[j][comparable_cols]
@@ -95,7 +102,7 @@ def compare_rows_fast(
                 diffs2[str(id2)] = diff_cols
             i += 1
             j += 1
-        elif id1 < id2:
+        elif n1 < n2:
             only_in_1.add(str(id1))
             i += 1
         else:
@@ -227,6 +234,11 @@ def main() -> int:
         default=os.path.join("output"),
         help="Directory to write highlighted Excel files (default: output)",
     )
+    parser.add_argument(
+        "--assume-sorted",
+        action="store_true",
+        help="Assume SEC_ID columns are already ascending; skip checks and any sorting",
+    )
 
     args = parser.parse_args()
 
@@ -254,7 +266,9 @@ def main() -> int:
     id_col2 = get_sec_id_column_name(df2)
     print(f"Detected SEC_ID columns -> file1: '{id_col1}', file2: '{id_col2}'")
 
-    diffs1, diffs2, only_in_1, only_in_2, comparable_cols = compare_rows_fast(df1, df2, id_col1, id_col2)
+    diffs1, diffs2, only_in_1, only_in_2, comparable_cols = compare_rows_fast(
+        df1, df2, id_col1, id_col2, assume_sorted=args.assume_sorted
+    )
 
     out1, out2 = derive_output_paths(file1, file2, args.output)
 
