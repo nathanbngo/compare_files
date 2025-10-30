@@ -46,8 +46,16 @@ def compare_rows_fast(
     start_ts = time.perf_counter()
 
     def _is_sorted(series: pd.Series) -> bool:
-        vals = series.to_numpy()
-        return np.all(vals[1:] >= vals[:-1]) if len(vals) > 1 else True
+        # Robust monotonic check: prefer numeric if all digits, else string order
+        if len(series) <= 1:
+            return True
+        s = series.astype(str).str.strip()
+        all_digits = s.str.fullmatch(r"\d+").all()
+        if all_digits:
+            nums = pd.to_numeric(s, errors="raise")
+            return nums.is_monotonic_increasing
+        # Fallback to string-based
+        return s.is_monotonic_increasing
 
     comparable_cols = intersect_columns(df1, df2, exclude={id_col1, id_col2})
 
