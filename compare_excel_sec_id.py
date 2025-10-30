@@ -14,11 +14,13 @@ BLUE_FILL = PatternFill(start_color="FF99CCFF", end_color="FF99CCFF", fill_type=
 
 
 def read_excel_as_str(path: str) -> pd.DataFrame:
+    print(f"Reading Excel: {path}")
     df = pd.read_excel(path, dtype=str)
     # Normalize whitespace and NaNs to empty strings for stable comparison
     df = df.fillna("")
     for col in df.columns:
         df[col] = df[col].astype(str).str.strip()
+    print(f"Loaded {len(df)} rows, {len(df.columns)} columns from: {path}")
     return df
 
 
@@ -52,6 +54,7 @@ def compare_rows(
     id_col1: str,
     id_col2: str,
 ) -> Tuple[Dict[str, List[str]], Dict[str, List[str]], Set[str], Set[str]]:
+    print("Comparing rows by SEC_ID...")
     id_map1 = build_row_maps(df1, id_col1)
     id_map2 = build_row_maps(df2, id_col2)
 
@@ -80,6 +83,12 @@ def compare_rows(
             diffs1[sec_id] = diff_cols.copy()
             diffs2[sec_id] = diff_cols.copy()
 
+    print(
+        "Comparison summary: "
+        f"common SEC_IDs={len(common_ids)}, differing rows={len(diffs1)}, "
+        f"only in file1={len(only_in_1)}, only in file2={len(only_in_2)}"
+    )
+
     return diffs1, diffs2, only_in_1, only_in_2
 
 
@@ -90,6 +99,7 @@ def apply_highlights(
     sec_ids_only_in_this: Set[str],
     id_col_name: str,
 ):
+    print(f"Applying highlights for: {src_path}")
     wb = load_workbook(src_path)
     ws = wb.active
 
@@ -140,6 +150,10 @@ def apply_highlights(
 
     # Ensure output directory exists
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    print(
+        f" - Yellow rows: {len(sec_id_to_diff_cols)} | Blue rows: {len(sec_ids_only_in_this)}"
+    )
+    print(f"Saving highlighted workbook to: {out_path}")
     wb.save(out_path)
 
 
@@ -223,6 +237,7 @@ def main() -> int:
 
     id_col1 = get_sec_id_column_name(df1)
     id_col2 = get_sec_id_column_name(df2)
+    print(f"Detected SEC_ID columns -> file1: '{id_col1}', file2: '{id_col2}'")
 
     diffs1, diffs2, only_in_1, only_in_2 = compare_rows(df1, df2, id_col1, id_col2)
 
@@ -235,8 +250,8 @@ def main() -> int:
         print(f"Failed to write highlighted workbooks: {e}")
         return 1
 
-    print(f"Wrote: {out1}")
-    print(f"Wrote: {out2}")
+    print(f"Done. Wrote: {out1}")
+    print(f"Done. Wrote: {out2}")
     return 0
 
 
