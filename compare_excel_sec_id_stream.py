@@ -132,6 +132,7 @@ def write_stream_highlight(
     out_path: str,
     sec_id_to_diff_cols: Dict[str, List[str]],
     sec_ids_only_in_this: Set[str],
+    id_col_name: str,
 ):
     import xlsxwriter
 
@@ -156,7 +157,7 @@ def write_stream_highlight(
     # Write data rows
     for r in range(len(df)):
         row = df.iloc[r]
-        sec_id = str(row.iloc[0])  # df is normalized to strings; SEC_ID is column 0 or named, but we only need to check membership by string
+        sec_id = str(row[id_col_name])
         row_format = None
         diff_cols: List[str] = []
 
@@ -273,8 +274,8 @@ def main() -> int:
     out1, out2 = derive_output_paths(file1, file2, args.output)
 
     try:
-        write_stream_highlight(df1, out1, diffs1, only_in_1)
-        write_stream_highlight(df2, out2, diffs2, only_in_2)
+        write_stream_highlight(df1, out1, diffs1, only_in_1, id_col1)
+        write_stream_highlight(df2, out2, diffs2, only_in_2, id_col2)
     except Exception as e:
         print(f"Failed to write highlighted workbooks: {e}")
         return 1
