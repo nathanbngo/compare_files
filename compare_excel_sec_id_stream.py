@@ -67,10 +67,6 @@ def compare_rows_fast(
     diffs1: Dict[str, List[str]] = {}
     diffs2: Dict[str, List[str]] = {}
 
-    arr1 = df1[comparable_cols].to_numpy(dtype=str, copy=False)
-    arr2 = df2[comparable_cols].to_numpy(dtype=str, copy=False)
-    col_names = np.array(comparable_cols, dtype=object)
-
     i = 0
     j = 0
     len1 = len(ids1)
@@ -79,9 +75,14 @@ def compare_rows_fast(
         id1 = ids1[i]
         id2 = ids2[j]
         if id1 == id2:
-            row_diff_mask = arr1[i] != arr2[j]
-            if row_diff_mask.any():
-                diff_cols = col_names[row_diff_mask].tolist()
+            # Per-row comparison to avoid building huge 2D string arrays in memory
+            s1 = df1.iloc[i][comparable_cols]
+            s2 = df2.iloc[j][comparable_cols]
+            diff_cols: List[str] = []
+            for col in comparable_cols:
+                if str(s1[col]) != str(s2[col]):
+                    diff_cols.append(col)
+            if diff_cols:
                 diffs1[str(id1)] = diff_cols
                 diffs2[str(id2)] = diff_cols
             i += 1
