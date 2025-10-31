@@ -1,0 +1,315 @@
+import argparse
+import os
+import sys
+from typing import Dict, List, Set, Tuple
+
+import pandas as pd
+import numpy as np
+import time
+
+
+def print_timing(label: str, start_ts: float) -> None:
+    elapsed = time.perf_counter() - start_ts
+    print(f"{label}: {elapsed:.2f}s")
+
+
+def read_out_file(path: str) -> pd.DataFrame:
+    print(f"Reading .out file: {path}")
+    with open(path, 'r') as f:
+        lines = f.readlines()
+
+    headers = []
+    data = []
+    in_data = False
+    in_fields = False
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        if line == 'START-OF-FIELDS':
+            in_fields = True
+            continue
+        elif line == 'END-OF-FIELDS':
+            in_fields = False
+            continue
+        elif line == 'START-OF-DATA':
+            in_data = True
+            continue
+        elif line == 'END-OF-DATA':
+            in_data = False
+            continue
+
+        if in_fields:
+            headers.append(line)
+        elif in_data:
+            row_data = [val.strip() for val in line.split('|')]
+            data.append(row_data)
+
+    num_headers = len(headers)
+    processed_data = []
+    for row in data:
+        if len(row) > num_headers:
+            processed_data.append(row[:num_headers])
+        else:
+            processed_data.append(row + [''] * (num_headers - len(row)))
+
+    df = pd.DataFrame(processed_data, columns=headers)
+    df = df.fillna("")
+    print(f"Loaded {len(df)} rows, {len(df.columns)} columns from: {path}")
+    return df
+
+def get_metadata_columns(df: pd.DataFrame) -> List[str]:
+    metadata_cols = []
+    for col in df.columns:
+        if (df[col] != '').all():
+            metadata_cols.append(col)
+        else:
+            # As soon as a column has a blank, the metadata section ends
+            break
+    return metadata_cols
+
+
+def get_key_column_name(df: pd.DataFrame) -> str:
+    if len(df.columns) == 0:
+        raise ValueError("Input file has no columns")
+    for col in df.columns:
+        if str(col).strip().lower() == "key":
+            return col
+    return df.columns[0]
+
+
+def intersect_columns(df1: pd.DataFrame, df2: pd.DataFrame, exclude: Set[str]) -> List[str]:
+    return [c for c in df1.columns if c in df2.columns and c not in exclude]
+
+
+def compare_rows_fast(
+    df1: pd.DataFrame,
+    df2: pd.DataFrame,
+    id_col1: str,
+    id_col2: str,
+    metadata_cols1: List[str],
+    metadata_cols2: List[str],
+) -> Tuple[Dict[str, List[str]], Dict[str, List[str]], Set[str], Set[str], List[str]]:
+    print("Comparing rows by KEY (stream-fast)...")
+    start_ts = time.perf_counter()
+
+    def _is_sorted(series: pd.Series) -> bool:
+        vals = series.to_numpy()
+        return np.all(vals[1:] >= vals[:-1]) if len(vals) > 1 else True
+
+    exclude_cols = {id_col1, id_col2}.union(metadata_cols1).union(metadata_cols2)
+    comparable_cols = intersect_columns(df1, df2, exclude=exclude_cols)
+
+    ids1 = df1[id_col1].to_numpy()
+    ids2 = df2[id_col2].to_numpy()
+
+    if not (_is_sorted(df1[id_col1]) and _is_sorted(df2[id_col2])):
+        print("Warning: KEYs not detected as ascending in one or both files; sorting for fast path...")
+        df1 = df1.sort_values(by=id_col1, kind="stable").reset_index(drop=True)
+        df2 = df2.sort_values(by=id_col2, kind="stable").reset_index(drop=True)
+        ids1 = df1[id_col1].to_numpy()
+        ids2 = df2[id_col2].to_numpy()
+
+    only_in_1: Set[str] = set()
+    only_in_2: Set[str] = set()
+    diffs1: Dict[str, List[str]] = {}
+    diffs2: Dict[str, List[str]] = {}
+
+    i = 0
+    j = 0
+    len1 = len(ids1)
+    len2 = len(ids2)
+    while i < len1 and j < len2:
+        id1 = ids1[i]
+        id2 = ids2[j]
+        if id1 == id2:
+            s1 = df1.iloc[i][comparable_cols]
+            s2 = df2.iloc[j][comparable_cols]
+            diff_cols: List[str] = []
+            for col in comparable_cols:
+                if str(s1[col]) != str(s2[col]):
+                    diff_cols.append(col)
+            if diff_cols:
+                diffs1[str(id1)] = diff_cols
+                diffs2[str(id2)] = diff_cols
+            i += 1
+            j += 1
+        elif id1 < id2:
+            only_in_1.add(str(id1))
+            i += 1
+        else:
+            only_in_2.add(str(id2))
+            j += 1
+
+    while i < len1:
+        only_in_1.add(str(ids1[i]))
+        i += 1
+    while j < len2:
+        only_in_2.add(str(ids2[j]))
+        j += 1
+
+    common_ids_count = (len(df1) - len(only_in_1)) if len(df1) <= len(df2) else (len(df2) - len(only_in_2))
+    print(
+        "Comparison summary: "
+        f"common KEYs={common_ids_count}, differing rows={len(diffs1)}, "
+        f"only in file1={len(only_in_1)}, only in file2={len(only_in_2)}"
+    )
+    print_timing("Compare elapsed", start_ts)
+
+    return diffs1, diffs2, only_in_1, only_in_2, comparable_cols
+
+
+def write_stream_highlight(
+    df: pd.DataFrame,
+    out_path: str,
+    key_to_diff_cols: Dict[str, List[str]],
+    keys_only_in_this: Set[str],
+):
+    import xlsxwriter
+
+    start_ts = time.perf_counter()
+    print(f"Stream writing highlighted workbook to: {out_path}")
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    wb = xlsxwriter.Workbook(out_path)
+    ws = wb.add_worksheet("Sheet1")
+
+    fmt_header = wb.add_format({"bold": True})
+    fmt_row_yellow = wb.add_format({"bg_color": "#FFFF99"})
+    fmt_cell_red = wb.add_format({"bg_color": "#FF9999"})
+    fmt_row_blue = wb.add_format({"bg_color": "#99CCFF"})
+
+    for c, name in enumerate(df.columns):
+        ws.write(0, c, name, fmt_header)
+
+    col_to_idx = {str(col): idx for idx, col in enumerate(df.columns)}
+
+    for r in range(len(df)):
+        row = df.iloc[r]
+        key = str(row.iloc[0])
+        row_format = None
+        diff_cols: List[str] = []
+
+        if key in keys_only_in_this:
+            row_format = fmt_row_blue
+        elif key in key_to_diff_cols:
+            row_format = fmt_row_yellow
+            diff_cols = key_to_diff_cols[key]
+
+        if row_format is not None:
+            ws.set_row(r + 1, None, row_format)
+
+        for c, value in enumerate(row.values):
+            ws.write(r + 1, c, value)
+
+        if diff_cols:
+            for col_name in diff_cols:
+                cidx = col_to_idx.get(col_name)
+                if cidx is not None:
+                    ws.write(r + 1, cidx, row.iloc[cidx], fmt_cell_red)
+
+    wb.close()
+    print_timing("Write elapsed", start_ts)
+
+
+def derive_output_paths(file1: str, file2: str, output_dir: str) -> Tuple[str, str]:
+    base1 = os.path.splitext(os.path.basename(file1))[0]
+    base2 = os.path.splitext(os.path.basename(file2))[0]
+    out1 = os.path.join(output_dir, f"{base1}__comp.xlsx")
+    out2 = os.path.join(output_dir, f"{base2}__comp.xlsx")
+    return out1, out2
+
+
+def _auto_discover_input_files(input_dir: str) -> Tuple[str, str]:
+    candidates: List[str] = []
+    if os.path.isdir(input_dir):
+        for name in sorted(os.listdir(input_dir)):
+            if name.lower().endswith(".out") and not name.startswith("~"):
+                candidates.append(os.path.join(input_dir, name))
+    if len(candidates) < 2:
+        raise FileNotFoundError(
+            f"Expected at least two .out files in '{input_dir}'. Found: {len(candidates)}"
+        )
+    return candidates[0], candidates[1]
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description=(
+            "FAST: Compare two .out files by KEY (assumed ascending or will be sorted). "
+            "Stream-write new highlighted Excel files: differing rows yellow, differing cells red, unmatched rows blue."
+        )
+    )
+    parser.add_argument(
+        "file1",
+        nargs="?",
+        help="Path to first .out file. If omitted, auto-uses two files from ./input",
+    )
+    parser.add_argument(
+        "file2",
+        nargs="?",
+        help="Path to second .out file. If omitted, auto-uses two files from ./input",
+    )
+    parser.add_argument(
+        "--input",
+        "-i",
+        default=os.path.join("input"),
+        help="Directory to read input .out files when auto-discovering (default: input)",
+    )
+    parser.add_argument(
+        "--output",
+        "-o",
+        default=os.path.join("output"),
+        help="Directory to write highlighted Excel files (default: output)",
+    )
+
+    args = parser.parse_args()
+
+    if args.file1 and args.file2:
+        file1 = args.file1
+        file2 = args.file2
+    else:
+        try:
+            file1, file2 = _auto_discover_input_files(args.input)
+            print(f"Auto-discovered input files: {file1} | {file2}")
+        except Exception as e:
+            print(f"Input discovery error: {e}")
+            return 1
+
+    try:
+        t0 = time.perf_counter()
+        df1 = read_out_file(file1)
+        df2 = read_out_file(file2)
+        print_timing("Read total", t0)
+    except Exception as e:
+        print(f"Failed to read .out files: {e}")
+        return 1
+
+    id_col1 = get_key_column_name(df1)
+    id_col2 = get_key_column_name(df2)
+    print(f"Detected KEY columns -> file1: '{id_col1}', file2: '{id_col2}'")
+
+    metadata_cols1 = get_metadata_columns(df1)
+    metadata_cols2 = get_metadata_columns(df2)
+    print(f"Metadata columns in file1: {metadata_cols1}")
+    print(f"Metadata columns in file2: {metadata_cols2}")
+
+    diffs1, diffs2, only_in_1, only_in_2, comparable_cols = compare_rows_fast(
+        df1, df2, id_col1, id_col2, metadata_cols1, metadata_cols2
+    )
+
+    out1, out2 = derive_output_paths(file1, file2, args.output)
+
+    try:
+        write_stream_highlight(df1, out1, diffs1, only_in_1)
+        write_stream_highlight(df2, out2, diffs2, only_in_2)
+    except Exception as e:
+        print(f"Failed to write highlighted workbooks: {e}")
+        return 1
+
+    print(f"Done. Wrote: {out1}")
+    print(f"Done. Wrote: {out2}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

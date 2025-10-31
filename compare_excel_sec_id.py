@@ -6,6 +6,8 @@ from typing import Dict, List, Set, Tuple
 import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
+import numpy as np
+import time
 
 
 RED_FILL = PatternFill(start_color="FFFF9999", end_color="FFFF9999", fill_type="solid")
@@ -55,6 +57,72 @@ def compare_rows(
     id_col2: str,
 ) -> Tuple[Dict[str, List[str]], Dict[str, List[str]], Set[str], Set[str]]:
     print("Comparing rows by SEC_ID...")
+    start_ts = time.perf_counter()
+
+    # Fast path: two-pointer merge walk if both SEC_ID columns are ascending
+    def _is_sorted(series: pd.Series) -> bool:
+        vals = series.to_numpy()
+        # Compare adjacent values as strings (already normalized to str)
+        return np.all(vals[1:] >= vals[:-1]) if len(vals) > 1 else True
+
+    use_fast_path = _is_sorted(df1[id_col1]) and _is_sorted(df2[id_col2])
+    if use_fast_path:
+        print("Using optimized two-pointer comparison (ascending SEC_IDs detected)")
+        comparable_cols = intersect_columns(df1, df2, exclude={id_col1, id_col2})
+
+        ids1 = df1[id_col1].to_numpy()
+        ids2 = df2[id_col2].to_numpy()
+        only_in_1: Set[str] = set()
+        only_in_2: Set[str] = set()
+        diffs1: Dict[str, List[str]] = {}
+        diffs2: Dict[str, List[str]] = {}
+
+        # Build 2D numpy views for comparable columns for vectorized row comparison
+        arr1 = df1[comparable_cols].to_numpy(dtype=str, copy=False)
+        arr2 = df2[comparable_cols].to_numpy(dtype=str, copy=False)
+        col_names = np.array(comparable_cols, dtype=object)
+
+        i = 0
+        j = 0
+        len1 = len(ids1)
+        len2 = len(ids2)
+        while i < len1 and j < len2:
+            id1 = ids1[i]
+            id2 = ids2[j]
+            if id1 == id2:
+                # Vectorized row comparison
+                row_diff_mask = arr1[i] != arr2[j]
+                if row_diff_mask.any():
+                    diff_cols = col_names[row_diff_mask].tolist()
+                    diffs1[id1] = diff_cols
+                    diffs2[id2] = diff_cols
+                i += 1
+                j += 1
+            elif id1 < id2:
+                only_in_1.add(str(id1))
+                i += 1
+            else:
+                only_in_2.add(str(id2))
+                j += 1
+
+        while i < len1:
+            only_in_1.add(str(ids1[i]))
+            i += 1
+        while j < len2:
+            only_in_2.add(str(ids2[j]))
+            j += 1
+
+        common_ids_count = (len(df1) - len(only_in_1)) if len(df1) <= len(df2) else (len(df2) - len(only_in_2))
+        print(
+            "Comparison summary: "
+            f"common SEC_IDs={common_ids_count}, differing rows={len(diffs1)}, "
+            f"only in file1={len(only_in_1)}, only in file2={len(only_in_2)}"
+        )
+
+        print(f"Compare elapsed: {time.perf_counter() - start_ts:.2f}s")
+        return diffs1, diffs2, only_in_1, only_in_2
+
+    # Fallback: general set/dict-based comparison
     id_map1 = build_row_maps(df1, id_col1)
     id_map2 = build_row_maps(df2, id_col2)
 
@@ -70,24 +138,22 @@ def compare_rows(
     diffs1: Dict[str, List[str]] = {}
     diffs2: Dict[str, List[str]] = {}
 
+    # Vectorize within each row to reduce Python-level loops
     for sec_id in common_ids:
-        row1 = df1.loc[id_map1[sec_id]]
-        row2 = df2.loc[id_map2[sec_id]]
-        diff_cols: List[str] = []
-        for col in comparable_cols:
-            v1 = row1[col]
-            v2 = row2[col]
-            if str(v1) != str(v2):
-                diff_cols.append(col)
-        if diff_cols:
-            diffs1[sec_id] = diff_cols.copy()
-            diffs2[sec_id] = diff_cols.copy()
+        r1 = df1.loc[id_map1[sec_id], comparable_cols].to_numpy(dtype=str, copy=False)
+        r2 = df2.loc[id_map2[sec_id], comparable_cols].to_numpy(dtype=str, copy=False)
+        mask = r1 != r2
+        if mask.any():
+            diff_cols = [col for col, m in zip(comparable_cols, mask) if m]
+            diffs1[sec_id] = diff_cols
+            diffs2[sec_id] = diff_cols
 
     print(
         "Comparison summary: "
         f"common SEC_IDs={len(common_ids)}, differing rows={len(diffs1)}, "
         f"only in file1={len(only_in_1)}, only in file2={len(only_in_2)}"
     )
+    print(f"Compare elapsed: {time.perf_counter() - start_ts:.2f}s")
 
     return diffs1, diffs2, only_in_1, only_in_2
 
