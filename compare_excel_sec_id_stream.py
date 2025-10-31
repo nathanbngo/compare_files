@@ -62,6 +62,18 @@ def compare_rows_fast(
         ids1 = df1[id_col1].to_numpy()
         ids2 = df2[id_col2].to_numpy()
 
+    if not assume_sorted and not (_is_sorted(df1[id_col1]) and _is_sorted(df2[id_col2])):
+        print("Warning: SEC_IDs not detected as ascending in one or both files; sorting for fast path...")
+        # Sort both frames by SEC_ID numerically to enable fast path
+        df1 = df1.assign(_sec_id_num=pd.to_numeric(df1[id_col1].astype(str).str.strip(), errors="coerce")).sort_values(by="_sec_id_num", kind="stable").drop(columns=["_sec_id_num"]).reset_index(drop=True)
+        df2 = df2.assign(_sec_id_num=pd.to_numeric(df2[id_col2].astype(str).str.strip(), errors="coerce")).sort_values(by="_sec_id_num", kind="stable").drop(columns=["_sec_id_num"]).reset_index(drop=True)
+        ids1 = df1[id_col1].to_numpy()
+        ids2 = df2[id_col2].to_numpy()
+
+    # Use numeric arrays for ordering comparisons
+    ids1_num = pd.to_numeric(pd.Series(ids1, dtype=str).str.strip(), errors="coerce").to_numpy()
+    ids2_num = pd.to_numeric(pd.Series(ids2, dtype=str).str.strip(), errors="coerce").to_numpy()
+
     only_in_1: Set[str] = set()
     only_in_2: Set[str] = set()
     diffs1: Dict[str, List[str]] = {}
@@ -75,6 +87,9 @@ def compare_rows_fast(
         id1 = ids1[i]
         id2 = ids2[j]
         if id1 == id2:
+        n1 = ids1_num[i]
+        n2 = ids2_num[j]
+        if n1 == n2:
             # Per-row comparison to avoid building huge 2D string arrays in memory
             s1 = df1.iloc[i][comparable_cols]
             s2 = df2.iloc[j][comparable_cols]
@@ -88,6 +103,7 @@ def compare_rows_fast(
             i += 1
             j += 1
         elif id1 < id2:
+        elif n1 < n2:
             only_in_1.add(str(id1))
             i += 1
         else:
@@ -117,6 +133,7 @@ def write_stream_highlight(
     out_path: str,
     sec_id_to_diff_cols: Dict[str, List[str]],
     sec_ids_only_in_this: Set[str],
+    id_col_name: str,
 ):
     import xlsxwriter
 
@@ -142,6 +159,7 @@ def write_stream_highlight(
     for r in range(len(df)):
         row = df.iloc[r]
         sec_id = str(row.iloc[0])  # df is normalized to strings; SEC_ID is column 0 or named, but we only need to check membership by string
+        sec_id = str(row[id_col_name])
         row_format = None
         diff_cols: List[str] = []
 
@@ -219,6 +237,11 @@ def main() -> int:
         default=os.path.join("output"),
         help="Directory to write highlighted Excel files (default: output)",
     )
+    parser.add_argument(
+        "--assume-sorted",
+        action="store_true",
+        help="Assume SEC_ID columns are already ascending; skip checks and any sorting",
+    )
 
     args = parser.parse_args()
 
@@ -247,12 +270,17 @@ def main() -> int:
     print(f"Detected SEC_ID columns -> file1: '{id_col1}', file2: '{id_col2}'")
 
     diffs1, diffs2, only_in_1, only_in_2, comparable_cols = compare_rows_fast(df1, df2, id_col1, id_col2)
+    diffs1, diffs2, only_in_1, only_in_2, comparable_cols = compare_rows_fast(
+        df1, df2, id_col1, id_col2, assume_sorted=args.assume_sorted
+    )
 
     out1, out2 = derive_output_paths(file1, file2, args.output)
 
     try:
         write_stream_highlight(df1, out1, diffs1, only_in_1)
         write_stream_highlight(df2, out2, diffs2, only_in_2)
+        write_stream_highlight(df1, out1, diffs1, only_in_1, id_col1)
+        write_stream_highlight(df2, out2, diffs2, only_in_2, id_col2)
     except Exception as e:
         print(f"Failed to write highlighted workbooks: {e}")
         return 1
@@ -264,3 +292,6 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+    sys.exit(main())
+
+
