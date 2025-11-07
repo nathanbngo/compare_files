@@ -172,10 +172,26 @@ def compare_rows_fast(
 
     if not (_is_sorted(df1[id_col1]) and _is_sorted(df2[id_col2])):
         print("Warning: KEYs not detected as ascending in one or both files; sorting for fast path...")
-        df1 = df1.sort_values(by=id_col1, kind="stable").reset_index(drop=True)
-        df2 = df2.sort_values(by=id_col2, kind="stable").reset_index(drop=True)
+        # Sort both frames by KEY numerically to enable fast path
+        df1 = df1.assign(_key_num=pd.to_numeric(df1[id_col1].astype(str).str.strip(), errors="coerce")).sort_values(by="_key_num", kind="stable").drop(columns=["_key_num"]).reset_index(drop=True)
+        df2 = df2.assign(_key_num=pd.to_numeric(df2[id_col2].astype(str).str.strip(), errors="coerce")).sort_values(by="_key_num", kind="stable").drop(columns=["_key_num"]).reset_index(drop=True)
         ids1 = df1[id_col1].to_numpy()
         ids2 = df2[id_col2].to_numpy()
+
+    # Use numeric arrays for ordering comparisons
+    ids1_num = pd.to_numeric(pd.Series(ids1, dtype=str).str.strip(), errors="coerce").to_numpy()
+    ids2_num = pd.to_numeric(pd.Series(ids2, dtype=str).str.strip(), errors="coerce").to_numpy()
+
+    def normalize_key(val) -> str:
+        """Normalize KEY to consistent string format."""
+        s = str(val).strip()
+        try:
+            num_val = float(s)
+            if num_val.is_integer():
+                return str(int(num_val))
+        except (ValueError, TypeError):
+            pass
+        return s
 
     only_in_1: Set[str] = set()
     only_in_2: Set[str] = set()
@@ -189,7 +205,9 @@ def compare_rows_fast(
     while i < len1 and j < len2:
         id1 = ids1[i]
         id2 = ids2[j]
-        if id1 == id2:
+        n1 = ids1_num[i]
+        n2 = ids2_num[j]
+        if n1 == n2:
             s1 = df1.iloc[i][comparable_cols]
             s2 = df2.iloc[j][comparable_cols]
             diff_cols: List[str] = []
@@ -197,22 +215,24 @@ def compare_rows_fast(
                 if str(s1[col]) != str(s2[col]):
                     diff_cols.append(col)
             if diff_cols:
-                diffs1[str(id1)] = diff_cols
-                diffs2[str(id2)] = diff_cols
+                id1_str = normalize_key(id1)
+                id2_str = normalize_key(id2)
+                diffs1[id1_str] = diff_cols
+                diffs2[id2_str] = diff_cols
             i += 1
             j += 1
-        elif id1 < id2:
-            only_in_1.add(str(id1))
+        elif n1 < n2:
+            only_in_1.add(normalize_key(id1))
             i += 1
         else:
-            only_in_2.add(str(id2))
+            only_in_2.add(normalize_key(id2))
             j += 1
 
     while i < len1:
-        only_in_1.add(str(ids1[i]))
+        only_in_1.add(normalize_key(ids1[i]))
         i += 1
     while j < len2:
-        only_in_2.add(str(ids2[j]))
+        only_in_2.add(normalize_key(ids2[j]))
         j += 1
 
     common_ids_count = (len(df1) - len(only_in_1)) if len(df1) <= len(df2) else (len(df2) - len(only_in_2))
@@ -248,35 +268,45 @@ def write_stream_highlight(
     for c, name in enumerate(df.columns):
         ws.write(0, c, name, fmt_header)
 
-    # Map column name to index
-    col_to_idx = {str(col): idx for idx, col in enumerate(df.columns)}
+    def normalize_key(val) -> str:
+        """Normalize KEY to consistent string format (same as in comparison)."""
+        s = str(val).strip()
+        try:
+            num_val = float(s)
+            if num_val.is_integer():
+                return str(int(num_val))
+        except (ValueError, TypeError):
+            pass
+        return s
 
-    # Write all rows with appropriate highlighting
+    # Write data rows
     for r in range(len(df)):
         row = df.iloc[r]
-        key = str(row.iloc[0])
+        # Normalize KEY string to match how it was stored during comparison
+        key = normalize_key(row.iloc[0])
         
-        # Determine row format
-        if key in keys_only_in_this:
-            # Blue only for rows that exist only in this file
-            ws.set_row(r + 1, None, fmt_row_blue)
-            # Write all cells normally for blue rows
-            for c, value in enumerate(row.values):
-                ws.write(r + 1, c, value)
-        else:
-            # If key exists in both files
-            diff_cols = key_to_diff_cols.get(key, [])
-            if diff_cols:
-                # Yellow for rows with differences
-                ws.set_row(r + 1, None, fmt_row_yellow)
+        # Determine row highlighting: blue (only in this file) takes priority over yellow (has differences)
+        is_only_in_this = key in keys_only_in_this
+        diff_cols = key_to_diff_cols.get(key, [])
+
+        # Write each cell with appropriate format
+        for c, value in enumerate(row.values):
+            col_name = str(df.columns[c])
             
-            # Write cells, red for differences
-            for c, value in enumerate(row.values):
-                col_name = str(df.columns[c])
+            if is_only_in_this:
+                # Blue row for KEYs only in this file
+                ws.write(r + 1, c, value, fmt_row_blue)
+            elif diff_cols:
+                # Row has differences: yellow background for all cells
                 if col_name in diff_cols:
+                    # Red cell for differing cells (red overrides yellow)
                     ws.write(r + 1, c, value, fmt_cell_red)
                 else:
-                    ws.write(r + 1, c, value)
+                    # Yellow cell for non-differing cells in a row with differences
+                    ws.write(r + 1, c, value, fmt_row_yellow)
+            else:
+                # Normal cell, no highlighting
+                ws.write(r + 1, c, value)
 
     wb.close()
     print_timing("Write elapsed", start_ts)
