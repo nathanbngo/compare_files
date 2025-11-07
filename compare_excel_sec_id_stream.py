@@ -226,28 +226,28 @@ def write_stream_highlight(
         # Normalize SEC_ID string to match how it was stored during comparison
         sec_id = normalize_sec_id(row[id_col_name])
         
-        row_format = None
-        diff_cols: List[str] = []
+        # Determine row highlighting: blue (only in this file) takes priority over yellow (has differences)
+        is_only_in_this = sec_id in sec_ids_only_in_this
+        diff_cols = sec_id_to_diff_cols.get(sec_id, [])
 
-        if sec_id in sec_ids_only_in_this:
-            row_format = fmt_row_blue
-        elif sec_id in sec_id_to_diff_cols:
-            row_format = fmt_row_yellow
-            diff_cols = sec_id_to_diff_cols[sec_id]
-
-        if row_format is not None:
-            ws.set_row(r + 1, None, row_format)
-
-        # Write all cells with default format (row format applies if set)
+        # Write each cell with appropriate format
         for c, value in enumerate(row.values):
-            ws.write(r + 1, c, value)
-
-        # Overwrite only diff cells with red format
-        if diff_cols:
-            for col_name in diff_cols:
-                cidx = col_to_idx.get(col_name)
-                if cidx is not None:
-                    ws.write(r + 1, cidx, row.iloc[cidx], fmt_cell_red)
+            col_name = str(df.columns[c])
+            
+            if is_only_in_this:
+                # Blue row for SEC_IDs only in this file
+                ws.write(r + 1, c, value, fmt_row_blue)
+            elif diff_cols:
+                # Row has differences: yellow background for all cells
+                if col_name in diff_cols:
+                    # Red cell for differing cells (red overrides yellow)
+                    ws.write(r + 1, c, value, fmt_cell_red)
+                else:
+                    # Yellow cell for non-differing cells in a row with differences
+                    ws.write(r + 1, c, value, fmt_row_yellow)
+            else:
+                # Normal cell, no highlighting
+                ws.write(r + 1, c, value)
 
     wb.close()
     print_timing("Write elapsed", start_ts)
