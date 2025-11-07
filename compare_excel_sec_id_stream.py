@@ -126,6 +126,17 @@ def compare_rows_fast(
     j = 0
     len1 = len(ids1)
     len2 = len(ids2)
+    def normalize_sec_id(val) -> str:
+        """Normalize SEC_ID to consistent string format."""
+        s = str(val).strip()
+        try:
+            num_val = float(s)
+            if num_val.is_integer():
+                return str(int(num_val))
+        except (ValueError, TypeError):
+            pass
+        return s
+
     while i < len1 and j < len2:
         id1 = ids1[i]
         id2 = ids2[j]
@@ -140,22 +151,24 @@ def compare_rows_fast(
                 if str(s1[col]) != str(s2[col]):
                     diff_cols.append(col)
             if diff_cols:
-                diffs1[str(id1)] = diff_cols
-                diffs2[str(id2)] = diff_cols
+                id1_str = normalize_sec_id(id1)
+                id2_str = normalize_sec_id(id2)
+                diffs1[id1_str] = diff_cols
+                diffs2[id2_str] = diff_cols
             i += 1
             j += 1
         elif n1 < n2:
-            only_in_1.add(str(id1))
+            only_in_1.add(normalize_sec_id(id1))
             i += 1
         else:
-            only_in_2.add(str(id2))
+            only_in_2.add(normalize_sec_id(id2))
             j += 1
 
     while i < len1:
-        only_in_1.add(str(ids1[i]))
+        only_in_1.add(normalize_sec_id(ids1[i]))
         i += 1
     while j < len2:
-        only_in_2.add(str(ids2[j]))
+        only_in_2.add(normalize_sec_id(ids2[j]))
         j += 1
 
     common_ids_count = (len(df1) - len(only_in_1)) if len(df1) <= len(df2) else (len(df2) - len(only_in_2))
@@ -196,10 +209,23 @@ def write_stream_highlight(
     # Map column name to index
     col_to_idx = {str(col): idx for idx, col in enumerate(df.columns)}
 
+    def normalize_sec_id(val) -> str:
+        """Normalize SEC_ID to consistent string format (same as in comparison)."""
+        s = str(val).strip()
+        try:
+            num_val = float(s)
+            if num_val.is_integer():
+                return str(int(num_val))
+        except (ValueError, TypeError):
+            pass
+        return s
+
     # Write data rows
     for r in range(len(df)):
         row = df.iloc[r]
-        sec_id = str(row[id_col_name])
+        # Normalize SEC_ID string to match how it was stored during comparison
+        sec_id = normalize_sec_id(row[id_col_name])
+        
         row_format = None
         diff_cols: List[str] = []
 
