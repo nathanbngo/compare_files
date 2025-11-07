@@ -1,12 +1,13 @@
-﻿# Python
+# Python
 __pycache__/
 *.pyc
 
 # Local artifacts
 input/~$*
 ~$*.xlsx
+input/
+output/
 
 # Editor
 .cursor/
 .vscode/
-
