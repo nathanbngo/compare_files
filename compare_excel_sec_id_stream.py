@@ -14,8 +14,11 @@ def print_timing(label: str, start_ts: float) -> None:
 
 
 def read_excel_as_str(path: str) -> pd.DataFrame:
-    print(f"Reading Excel: {path}")
-    df = pd.read_excel(path, dtype=str)
+    print(f"Reading Excel/CSV: {path}")
+    if path.lower().endswith('.csv'):
+        df = pd.read_csv(path, dtype=str)
+    else:
+        df = pd.read_excel(path, dtype=str)
     df = df.fillna("")
     for col in df.columns:
         df[col] = df[col].astype(str).str.strip()
@@ -24,12 +27,40 @@ def read_excel_as_str(path: str) -> pd.DataFrame:
 
 
 def get_sec_id_column_name(df: pd.DataFrame) -> str:
+    # Always treat the first column (column A) as the SEC_ID / key column.
     if len(df.columns) == 0:
         raise ValueError("Excel has no columns")
-    for col in df.columns:
-        if str(col).strip().lower() == "sec_id":
-            return col
     return df.columns[0]
+
+
+def col_letter_to_index(letter: str) -> int:
+    """Convert Excel-style column letters to 0-based index."""
+    letter = letter.strip().upper()
+    if not letter:
+        raise ValueError("Empty column letter")
+    idx = 0
+    for ch in letter:
+        if not ('A' <= ch <= 'Z'):
+            raise ValueError(f"Invalid column letter: {letter}")
+        idx = idx * 26 + (ord(ch) - ord('A') + 1)
+    return idx - 1
+
+
+def parse_ignore_columns(df: pd.DataFrame, ignore_str: str) -> Set[str]:
+    ignore_cols: Set[str] = set()
+    if not ignore_str:
+        return ignore_cols
+    for token in [t.strip() for t in ignore_str.split(',') if t.strip()]:
+        try:
+            idx = col_letter_to_index(token)
+        except ValueError as e:
+            print(f"Warning: ignoring invalid column token '{token}': {e}")
+            continue
+        if idx < 0 or idx >= len(df.columns):
+            print(f"Warning: column '{token}' index {idx} out of range for dataframe with {len(df.columns)} columns; skipping")
+            continue
+        ignore_cols.add(df.columns[idx])
+    return ignore_cols
 
 
 def intersect_columns(df1: pd.DataFrame, df2: pd.DataFrame, exclude: Set[str]) -> List[str]:
@@ -41,15 +72,43 @@ def compare_rows_fast(
     df2: pd.DataFrame,
     id_col1: str,
     id_col2: str,
+    ignore_cols1: Set[str] = None,
+    ignore_cols2: Set[str] = None,
 ) -> Tuple[Dict[str, List[str]], Dict[str, List[str]], Set[str], Set[str], List[str]]:
     print("Comparing rows by SEC_ID (stream-fast)...")
     start_ts = time.perf_counter()
 
     def _is_sorted(series: pd.Series) -> bool:
-        vals = series.to_numpy()
-        return np.all(vals[1:] >= vals[:-1]) if len(vals) > 1 else True
+        # Attempt to convert to numeric. If errors, coerce to NaN.
+        numeric_series = pd.to_numeric(series, errors='coerce')
+        
+        # Check if all values could be converted to numeric
+        if not numeric_series.isnull().any():
+            # If all numeric, compare numerically
+            vals = numeric_series.to_numpy()
+            return np.all(vals[1:] >= vals[:-1]) if len(vals) > 1 else True
+        else:
+            # If not all numeric, compare as strings
+            vals = series.astype(str).to_numpy()
+            return np.all(vals[1:] >= vals[:-1]) if len(vals) > 1 else True
 
-    comparable_cols = intersect_columns(df1, df2, exclude={id_col1, id_col2})
+    ignore_cols1 = ignore_cols1 or set()
+    ignore_cols2 = ignore_cols2 or set()
+    
+    # For Excel, only exclude the ID columns and user-specified ignore columns
+    exclude_cols = {id_col1, id_col2}.union(ignore_cols1).union(ignore_cols2)
+    # Get columns that exist in both dataframes and aren't excluded
+    common_cols = set(df1.columns).intersection(df2.columns)
+    comparable_cols = sorted([c for c in common_cols if c not in exclude_cols])
+    print(f"Will compare columns: {comparable_cols}")
+    
+    # Validate column names match between DataFrames
+    if id_col1 != id_col2:
+        print(f"Warning: ID column names don't match: {id_col1} vs {id_col2}")
+    if set(df1.columns) != set(df2.columns):
+        print("Warning: Column names or order differs between files:")
+        print(f"File1: {list(df1.columns)}")
+        print(f"File2: {list(df2.columns)}")
 
     ids1 = df1[id_col1].to_numpy()
     ids2 = df2[id_col2].to_numpy()
@@ -80,11 +139,13 @@ def compare_rows_fast(
             s2 = df2.iloc[j][comparable_cols]
             diff_cols: List[str] = []
             for col in comparable_cols:
-                if str(s1[col]) != str(s2[col]):
+                if str(s1[col]).strip() != str(s2[col]).strip():
                     diff_cols.append(col)
-            if diff_cols:
-                diffs1[str(id1)] = diff_cols
-                diffs2[str(id2)] = diff_cols
+            # after checking all comparable columns, record diffs if any
+            if len(diff_cols) > 0:
+                id_str = str(id1)
+                diffs1[id_str] = list(diff_cols)
+                diffs2[id_str] = list(diff_cols)
             i += 1
             j += 1
         elif id1 < id2:
@@ -138,32 +199,32 @@ def write_stream_highlight(
     # Map column name to index
     col_to_idx = {str(col): idx for idx, col in enumerate(df.columns)}
 
-    # Write data rows
+    # Write all rows with appropriate highlighting
     for r in range(len(df)):
         row = df.iloc[r]
-        sec_id = str(row.iloc[0])  # df is normalized to strings; SEC_ID is column 0 or named, but we only need to check membership by string
-        row_format = None
-        diff_cols: List[str] = []
-
+        sec_id = str(row.iloc[0])
+        
+        # Determine row format
         if sec_id in sec_ids_only_in_this:
-            row_format = fmt_row_blue
-        elif sec_id in sec_id_to_diff_cols:
-            row_format = fmt_row_yellow
-            diff_cols = sec_id_to_diff_cols[sec_id]
-
-        if row_format is not None:
-            ws.set_row(r + 1, None, row_format)
-
-        # Write all cells with default format (row format applies if set)
-        for c, value in enumerate(row.values):
-            ws.write(r + 1, c, value)
-
-        # Overwrite only diff cells with red format
-        if diff_cols:
-            for col_name in diff_cols:
-                cidx = col_to_idx.get(col_name)
-                if cidx is not None:
-                    ws.write(r + 1, cidx, row.iloc[cidx], fmt_cell_red)
+            # Blue only for rows that exist only in this file
+            ws.set_row(r + 1, None, fmt_row_blue)
+            # Write all cells normally for blue rows
+            for c, value in enumerate(row.values):
+                ws.write(r + 1, c, value)
+        else:
+            # If SEC_ID exists in both files
+            diff_cols = sec_id_to_diff_cols.get(sec_id, [])
+            if diff_cols:
+                # Yellow for rows with differences
+                ws.set_row(r + 1, None, fmt_row_yellow)
+            
+            # Write cells, red for differences
+            for c, value in enumerate(row.values):
+                col_name = str(df.columns[c])
+                if col_name in diff_cols:
+                    ws.write(r + 1, c, value, fmt_cell_red)
+                else:
+                    ws.write(r + 1, c, value)
 
     wb.close()
     print_timing("Write elapsed", start_ts)
@@ -219,6 +280,12 @@ def main() -> int:
         default=os.path.join("output"),
         help="Directory to write highlighted Excel files (default: output)",
     )
+    parser.add_argument(
+        "--ignore-columns",
+        "-x",
+        default="",
+        help="Comma-separated Excel column letters to ignore in comparison (e.g. A,AB,AC)",
+    )
 
     args = parser.parse_args()
 
@@ -246,7 +313,16 @@ def main() -> int:
     id_col2 = get_sec_id_column_name(df2)
     print(f"Detected SEC_ID columns -> file1: '{id_col1}', file2: '{id_col2}'")
 
-    diffs1, diffs2, only_in_1, only_in_2, comparable_cols = compare_rows_fast(df1, df2, id_col1, id_col2)
+    # Parse ignore-columns option and map to actual column names
+    ignore_cols1 = parse_ignore_columns(df1, args.ignore_columns)
+    ignore_cols2 = parse_ignore_columns(df2, args.ignore_columns)
+    if ignore_cols1 or ignore_cols2:
+        print(f"Ignoring columns for comparison (file1): {sorted(ignore_cols1)}")
+        print(f"Ignoring columns for comparison (file2): {sorted(ignore_cols2)}")
+
+    diffs1, diffs2, only_in_1, only_in_2, comparable_cols = compare_rows_fast(
+        df1, df2, id_col1, id_col2, ignore_cols1=ignore_cols1, ignore_cols2=ignore_cols2
+    )
 
     out1, out2 = derive_output_paths(file1, file2, args.output)
 

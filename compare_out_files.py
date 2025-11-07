@@ -46,35 +46,87 @@ def read_out_file(path: str) -> pd.DataFrame:
             data.append(row_data)
 
     num_headers = len(headers)
+    # Determine metadata offset: columns at left that are filled in every row
+    if not data:
+        raise ValueError(f"{path}: No data rows found")
+
+    max_columns = max(len(row) for row in data)
+    column_stats = [0] * max_columns
+    for row in data:
+        for i, val in enumerate(row):
+            if val.strip():
+                column_stats[i] += 1
+
+    offset = 0
+    for count in column_stats:
+        if count == len(data):
+            offset += 1
+        else:
+            break
+
+    # Build columns: metadata columns (KEY, META2, ...) + headers
+    meta_cols = [f"META{i+1}" for i in range(offset)]
+    if meta_cols:
+        meta_cols[0] = "KEY"
+    columns = meta_cols + headers
+
+    # Normalize rows to expected length
+    expected_length = offset + len(headers)
     processed_data = []
     for row in data:
-        if len(row) > num_headers:
-            processed_data.append(row[:num_headers])
-        else:
-            processed_data.append(row + [''] * (num_headers - len(row)))
+        if len(row) < expected_length:
+            row = row + [''] * (expected_length - len(row))
+        elif len(row) > expected_length:
+            row = row[:expected_length]
+        processed_data.append(row)
 
-    df = pd.DataFrame(processed_data, columns=headers)
+    df = pd.DataFrame(processed_data, columns=columns)
     df = df.fillna("")
     print(f"Loaded {len(df)} rows, {len(df.columns)} columns from: {path}")
     return df
 
 def get_metadata_columns(df: pd.DataFrame) -> List[str]:
-    metadata_cols = []
-    for col in df.columns:
-        if (df[col] != '').all():
-            metadata_cols.append(col)
-        else:
-            # As soon as a column has a blank, the metadata section ends
-            break
-    return metadata_cols
+    # Only treat the key column (first column) as metadata
+    return [df.columns[0]] if len(df.columns) > 0 else []
+
+
+def col_letter_to_index(letter: str) -> int:
+    """Convert Excel-style column letters (A, B, ..., Z, AA, AB, ...) to 0-based index."""
+    letter = letter.strip().upper()
+    if not letter:
+        raise ValueError("Empty column letter")
+    idx = 0
+    for ch in letter:
+        if not ('A' <= ch <= 'Z'):
+            raise ValueError(f"Invalid column letter: {letter}")
+        idx = idx * 26 + (ord(ch) - ord('A') + 1)
+    return idx - 1
+
+
+def parse_ignore_columns(df: pd.DataFrame, ignore_str: str) -> Set[str]:
+    """Parse a comma-separated list of column letters and return a set of column names to ignore.
+    If a specified index is out of range it will be skipped with a warning.
+    """
+    ignore_cols: Set[str] = set()
+    if not ignore_str:
+        return ignore_cols
+    for token in [t.strip() for t in ignore_str.split(',') if t.strip()]:
+        try:
+            idx = col_letter_to_index(token)
+        except ValueError as e:
+            print(f"Warning: ignoring invalid column token '{token}': {e}")
+            continue
+        if idx < 0 or idx >= len(df.columns):
+            print(f"Warning: column '{token}' index {idx} out of range for dataframe with {len(df.columns)} columns; skipping")
+            continue
+        ignore_cols.add(df.columns[idx])
+    return ignore_cols
 
 
 def get_key_column_name(df: pd.DataFrame) -> str:
+    # Always treat the first column (column A) as the key column.
     if len(df.columns) == 0:
         raise ValueError("Input file has no columns")
-    for col in df.columns:
-        if str(col).strip().lower() == "key":
-            return col
     return df.columns[0]
 
 
@@ -89,15 +141,30 @@ def compare_rows_fast(
     id_col2: str,
     metadata_cols1: List[str],
     metadata_cols2: List[str],
+    ignore_cols1: Set[str] = None,
+    ignore_cols2: Set[str] = None,
 ) -> Tuple[Dict[str, List[str]], Dict[str, List[str]], Set[str], Set[str], List[str]]:
     print("Comparing rows by KEY (stream-fast)...")
     start_ts = time.perf_counter()
 
     def _is_sorted(series: pd.Series) -> bool:
-        vals = series.to_numpy()
-        return np.all(vals[1:] >= vals[:-1]) if len(vals) > 1 else True
+        # Attempt to convert to numeric. If errors, coerce to NaN.
+        numeric_series = pd.to_numeric(series, errors='coerce')
+        
+        # Check if all values could be converted to numeric
+        if not numeric_series.isnull().any():
+            # If all numeric, compare numerically
+            vals = numeric_series.to_numpy()
+            return np.all(vals[1:] >= vals[:-1]) if len(vals) > 1 else True
+        else:
+            # If not all numeric, compare as strings
+            vals = series.astype(str).to_numpy()
+            return np.all(vals[1:] >= vals[:-1]) if len(vals) > 1 else True
 
-    exclude_cols = {id_col1, id_col2}.union(metadata_cols1).union(metadata_cols2)
+    ignore_cols1 = ignore_cols1 or set()
+    ignore_cols2 = ignore_cols2 or set()
+
+    exclude_cols = {id_col1, id_col2}.union(metadata_cols1).union(metadata_cols2).union(ignore_cols1).union(ignore_cols2)
     comparable_cols = intersect_columns(df1, df2, exclude=exclude_cols)
 
     ids1 = df1[id_col1].to_numpy()
@@ -181,31 +248,35 @@ def write_stream_highlight(
     for c, name in enumerate(df.columns):
         ws.write(0, c, name, fmt_header)
 
+    # Map column name to index
     col_to_idx = {str(col): idx for idx, col in enumerate(df.columns)}
 
+    # Write all rows with appropriate highlighting
     for r in range(len(df)):
         row = df.iloc[r]
         key = str(row.iloc[0])
-        row_format = None
-        diff_cols: List[str] = []
-
+        
+        # Determine row format
         if key in keys_only_in_this:
-            row_format = fmt_row_blue
-        elif key in key_to_diff_cols:
-            row_format = fmt_row_yellow
-            diff_cols = key_to_diff_cols[key]
-
-        if row_format is not None:
-            ws.set_row(r + 1, None, row_format)
-
-        for c, value in enumerate(row.values):
-            ws.write(r + 1, c, value)
-
-        if diff_cols:
-            for col_name in diff_cols:
-                cidx = col_to_idx.get(col_name)
-                if cidx is not None:
-                    ws.write(r + 1, cidx, row.iloc[cidx], fmt_cell_red)
+            # Blue only for rows that exist only in this file
+            ws.set_row(r + 1, None, fmt_row_blue)
+            # Write all cells normally for blue rows
+            for c, value in enumerate(row.values):
+                ws.write(r + 1, c, value)
+        else:
+            # If key exists in both files
+            diff_cols = key_to_diff_cols.get(key, [])
+            if diff_cols:
+                # Yellow for rows with differences
+                ws.set_row(r + 1, None, fmt_row_yellow)
+            
+            # Write cells, red for differences
+            for c, value in enumerate(row.values):
+                col_name = str(df.columns[c])
+                if col_name in diff_cols:
+                    ws.write(r + 1, c, value, fmt_cell_red)
+                else:
+                    ws.write(r + 1, c, value)
 
     wb.close()
     print_timing("Write elapsed", start_ts)
@@ -261,6 +332,12 @@ def main() -> int:
         default=os.path.join("output"),
         help="Directory to write highlighted Excel files (default: output)",
     )
+    parser.add_argument(
+        "--ignore-columns",
+        "-x",
+        default="",
+        help="Comma-separated Excel column letters to ignore in comparison (e.g. A,AB,AC)",
+    )
 
     args = parser.parse_args()
 
@@ -293,8 +370,22 @@ def main() -> int:
     print(f"Metadata columns in file1: {metadata_cols1}")
     print(f"Metadata columns in file2: {metadata_cols2}")
 
+    # Parse ignore-columns option and map to actual column names
+    ignore_cols1 = parse_ignore_columns(df1, args.ignore_columns)
+    ignore_cols2 = parse_ignore_columns(df2, args.ignore_columns)
+    if ignore_cols1 or ignore_cols2:
+        print(f"Ignoring columns for comparison (file1): {sorted(ignore_cols1)}")
+        print(f"Ignoring columns for comparison (file2): {sorted(ignore_cols2)}")
+
     diffs1, diffs2, only_in_1, only_in_2, comparable_cols = compare_rows_fast(
-        df1, df2, id_col1, id_col2, metadata_cols1, metadata_cols2
+        df1,
+        df2,
+        id_col1,
+        id_col2,
+        metadata_cols1,
+        metadata_cols2,
+        ignore_cols1=ignore_cols1,
+        ignore_cols2=ignore_cols2,
     )
 
     out1, out2 = derive_output_paths(file1, file2, args.output)
