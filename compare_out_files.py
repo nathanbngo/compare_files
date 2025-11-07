@@ -215,10 +215,19 @@ def compare_rows_fast(
                 if str(s1[col]) != str(s2[col]):
                     diff_cols.append(col)
             if diff_cols:
-                id1_str = normalize_key(id1)
-                id2_str = normalize_key(id2)
-                diffs1[id1_str] = diff_cols
-                diffs2[id2_str] = diff_cols
+                # Use the same normalized key for both dictionaries to ensure both files highlight
+                # Since n1 == n2, normalize based on the numeric value for consistency
+                if not (np.isnan(n1) or np.isnan(n2)):
+                    # Use numeric value for consistent normalization
+                    if isinstance(n1, (int, np.integer)) or (isinstance(n1, (float, np.floating)) and n1.is_integer()):
+                        normalized_key = str(int(n1))
+                    else:
+                        normalized_key = str(n1)
+                else:
+                    # Fallback to string normalization if not numeric
+                    normalized_key = normalize_key(id1)
+                diffs1[normalized_key] = diff_cols
+                diffs2[normalized_key] = diff_cols
             i += 1
             j += 1
         elif n1 < n2:
