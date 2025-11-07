@@ -14,16 +14,11 @@ def print_timing(label: str, start_ts: float) -> None:
 
 
 def read_excel_as_str(path: str) -> pd.DataFrame:
-<<<<<<< HEAD
-    print(f"Reading Excel: {path}")
-    df = pd.read_excel(path, dtype=str)
-=======
     print(f"Reading Excel/CSV: {path}")
     if path.lower().endswith('.csv'):
         df = pd.read_csv(path, dtype=str)
     else:
         df = pd.read_excel(path, dtype=str)
->>>>>>> 61bca3d99e4acd9d624bc19bc83daa869203109f
     df = df.fillna("")
     for col in df.columns:
         df[col] = df[col].astype(str).str.strip()
@@ -32,19 +27,11 @@ def read_excel_as_str(path: str) -> pd.DataFrame:
 
 
 def get_sec_id_column_name(df: pd.DataFrame) -> str:
-<<<<<<< HEAD
     if len(df.columns) == 0:
         raise ValueError("Excel has no columns")
     for col in df.columns:
         if str(col).strip().lower() == "sec_id":
             return col
-    return df.columns[0]
-
-
-=======
-    # Always treat the first column (column A) as the SEC_ID / key column.
-    if len(df.columns) == 0:
-        raise ValueError("Excel has no columns")
     return df.columns[0]
 
 
@@ -78,7 +65,6 @@ def parse_ignore_columns(df: pd.DataFrame, ignore_str: str) -> Set[str]:
     return ignore_cols
 
 
->>>>>>> 61bca3d99e4acd9d624bc19bc83daa869203109f
 def intersect_columns(df1: pd.DataFrame, df2: pd.DataFrame, exclude: Set[str]) -> List[str]:
     return [c for c in df1.columns if c in df2.columns and c not in exclude]
 
@@ -88,18 +74,14 @@ def compare_rows_fast(
     df2: pd.DataFrame,
     id_col1: str,
     id_col2: str,
-<<<<<<< HEAD
     assume_sorted: bool = False,
-=======
     ignore_cols1: Set[str] = None,
     ignore_cols2: Set[str] = None,
->>>>>>> 61bca3d99e4acd9d624bc19bc83daa869203109f
 ) -> Tuple[Dict[str, List[str]], Dict[str, List[str]], Set[str], Set[str], List[str]]:
     print("Comparing rows by SEC_ID (stream-fast)...")
     start_ts = time.perf_counter()
 
     def _is_sorted(series: pd.Series) -> bool:
-<<<<<<< HEAD
         # Robust monotonic check: prefer numeric if all digits, else string order
         if len(series) <= 1:
             return True
@@ -111,44 +93,18 @@ def compare_rows_fast(
         # Fallback to string-based
         return s.is_monotonic_increasing
 
-    comparable_cols = intersect_columns(df1, df2, exclude={id_col1, id_col2})
-=======
-        # Attempt to convert to numeric. If errors, coerce to NaN.
-        numeric_series = pd.to_numeric(series, errors='coerce')
-        
-        # Check if all values could be converted to numeric
-        if not numeric_series.isnull().any():
-            # If all numeric, compare numerically
-            vals = numeric_series.to_numpy()
-            return np.all(vals[1:] >= vals[:-1]) if len(vals) > 1 else True
-        else:
-            # If not all numeric, compare as strings
-            vals = series.astype(str).to_numpy()
-            return np.all(vals[1:] >= vals[:-1]) if len(vals) > 1 else True
-
     ignore_cols1 = ignore_cols1 or set()
     ignore_cols2 = ignore_cols2 or set()
     
-    # For Excel, only exclude the ID columns and user-specified ignore columns
+    # Exclude ID columns and user-specified ignore columns
     exclude_cols = {id_col1, id_col2}.union(ignore_cols1).union(ignore_cols2)
-    # Get columns that exist in both dataframes and aren't excluded
-    common_cols = set(df1.columns).intersection(df2.columns)
-    comparable_cols = sorted([c for c in common_cols if c not in exclude_cols])
-    print(f"Will compare columns: {comparable_cols}")
-    
-    # Validate column names match between DataFrames
-    if id_col1 != id_col2:
-        print(f"Warning: ID column names don't match: {id_col1} vs {id_col2}")
-    if set(df1.columns) != set(df2.columns):
-        print("Warning: Column names or order differs between files:")
-        print(f"File1: {list(df1.columns)}")
-        print(f"File2: {list(df2.columns)}")
->>>>>>> 61bca3d99e4acd9d624bc19bc83daa869203109f
+    comparable_cols = intersect_columns(df1, df2, exclude=exclude_cols)
+    if ignore_cols1 or ignore_cols2:
+        print(f"Will compare {len(comparable_cols)} columns (excluding {len(exclude_cols)} columns)")
 
     ids1 = df1[id_col1].to_numpy()
     ids2 = df2[id_col2].to_numpy()
 
-<<<<<<< HEAD
     if not assume_sorted and not (_is_sorted(df1[id_col1]) and _is_sorted(df2[id_col2])):
         print("Warning: SEC_IDs not detected as ascending in one or both files; sorting for fast path...")
         # Sort both frames by SEC_ID numerically to enable fast path
@@ -161,16 +117,6 @@ def compare_rows_fast(
     ids1_num = pd.to_numeric(pd.Series(ids1, dtype=str).str.strip(), errors="coerce").to_numpy()
     ids2_num = pd.to_numeric(pd.Series(ids2, dtype=str).str.strip(), errors="coerce").to_numpy()
 
-=======
-    if not (_is_sorted(df1[id_col1]) and _is_sorted(df2[id_col2])):
-        print("Warning: SEC_IDs not detected as ascending in one or both files; sorting for fast path...")
-        # Sort both frames by SEC_ID to enable fast path
-        df1 = df1.sort_values(by=id_col1, kind="stable").reset_index(drop=True)
-        df2 = df2.sort_values(by=id_col2, kind="stable").reset_index(drop=True)
-        ids1 = df1[id_col1].to_numpy()
-        ids2 = df2[id_col2].to_numpy()
-
->>>>>>> 61bca3d99e4acd9d624bc19bc83daa869203109f
     only_in_1: Set[str] = set()
     only_in_2: Set[str] = set()
     diffs1: Dict[str, List[str]] = {}
@@ -228,10 +174,7 @@ def write_stream_highlight(
     out_path: str,
     sec_id_to_diff_cols: Dict[str, List[str]],
     sec_ids_only_in_this: Set[str],
-<<<<<<< HEAD
     id_col_name: str,
-=======
->>>>>>> 61bca3d99e4acd9d624bc19bc83daa869203109f
 ):
     import xlsxwriter
 
@@ -253,7 +196,6 @@ def write_stream_highlight(
     # Map column name to index
     col_to_idx = {str(col): idx for idx, col in enumerate(df.columns)}
 
-<<<<<<< HEAD
     # Write data rows
     for r in range(len(df)):
         row = df.iloc[r]
@@ -280,34 +222,6 @@ def write_stream_highlight(
                 cidx = col_to_idx.get(col_name)
                 if cidx is not None:
                     ws.write(r + 1, cidx, row.iloc[cidx], fmt_cell_red)
-=======
-    # Write all rows with appropriate highlighting
-    for r in range(len(df)):
-        row = df.iloc[r]
-        sec_id = str(row.iloc[0])
-        
-        # Determine row format
-        if sec_id in sec_ids_only_in_this:
-            # Blue only for rows that exist only in this file
-            ws.set_row(r + 1, None, fmt_row_blue)
-            # Write all cells normally for blue rows
-            for c, value in enumerate(row.values):
-                ws.write(r + 1, c, value)
-        else:
-            # If SEC_ID exists in both files
-            diff_cols = sec_id_to_diff_cols.get(sec_id, [])
-            if diff_cols:
-                # Yellow for rows with differences
-                ws.set_row(r + 1, None, fmt_row_yellow)
-            
-            # Write cells, red for differences
-            for c, value in enumerate(row.values):
-                col_name = str(df.columns[c])
-                if col_name in diff_cols:
-                    ws.write(r + 1, c, value, fmt_cell_red)
-                else:
-                    ws.write(r + 1, c, value)
->>>>>>> 61bca3d99e4acd9d624bc19bc83daa869203109f
 
     wb.close()
     print_timing("Write elapsed", start_ts)
@@ -325,11 +239,11 @@ def _auto_discover_input_files(input_dir: str) -> Tuple[str, str]:
     candidates: List[str] = []
     if os.path.isdir(input_dir):
         for name in sorted(os.listdir(input_dir)):
-            if name.lower().endswith(".xlsx") and not name.startswith("~$"):
+            if name.lower().endswith((".xlsx", ".csv")) and not name.startswith("~$"):
                 candidates.append(os.path.join(input_dir, name))
     if len(candidates) < 2:
         raise FileNotFoundError(
-            f"Expected at least two .xlsx files in '{input_dir}'. Found: {len(candidates)}"
+            f"Expected at least two .xlsx/.csv files in '{input_dir}'. Found: {len(candidates)}"
         )
     return candidates[0], candidates[1]
 
@@ -344,12 +258,12 @@ def main() -> int:
     parser.add_argument(
         "file1",
         nargs="?",
-        help="Path to first Excel file (.xlsx). If omitted, auto-uses two files from ./input",
+        help="Path to first Excel file (.xlsx/.csv). If omitted, auto-uses two files from ./input",
     )
     parser.add_argument(
         "file2",
         nargs="?",
-        help="Path to second Excel file (.xlsx). If omitted, auto-uses two files from ./input",
+        help="Path to second Excel file (.xlsx/.csv). If omitted, auto-uses two files from ./input",
     )
     parser.add_argument(
         "--input",
@@ -364,16 +278,15 @@ def main() -> int:
         help="Directory to write highlighted Excel files (default: output)",
     )
     parser.add_argument(
-<<<<<<< HEAD
         "--assume-sorted",
         action="store_true",
         help="Assume SEC_ID columns are already ascending; skip checks and any sorting",
-=======
+    )
+    parser.add_argument(
         "--ignore-columns",
         "-x",
         default="",
         help="Comma-separated Excel column letters to ignore in comparison (e.g. A,AB,AC)",
->>>>>>> 61bca3d99e4acd9d624bc19bc83daa869203109f
     )
 
     args = parser.parse_args()
@@ -402,10 +315,6 @@ def main() -> int:
     id_col2 = get_sec_id_column_name(df2)
     print(f"Detected SEC_ID columns -> file1: '{id_col1}', file2: '{id_col2}'")
 
-<<<<<<< HEAD
-    diffs1, diffs2, only_in_1, only_in_2, comparable_cols = compare_rows_fast(
-        df1, df2, id_col1, id_col2, assume_sorted=args.assume_sorted
-=======
     # Parse ignore-columns option and map to actual column names
     ignore_cols1 = parse_ignore_columns(df1, args.ignore_columns)
     ignore_cols2 = parse_ignore_columns(df2, args.ignore_columns)
@@ -414,20 +323,14 @@ def main() -> int:
         print(f"Ignoring columns for comparison (file2): {sorted(ignore_cols2)}")
 
     diffs1, diffs2, only_in_1, only_in_2, comparable_cols = compare_rows_fast(
-        df1, df2, id_col1, id_col2, ignore_cols1=ignore_cols1, ignore_cols2=ignore_cols2
->>>>>>> 61bca3d99e4acd9d624bc19bc83daa869203109f
+        df1, df2, id_col1, id_col2, assume_sorted=args.assume_sorted, ignore_cols1=ignore_cols1, ignore_cols2=ignore_cols2
     )
 
     out1, out2 = derive_output_paths(file1, file2, args.output)
 
     try:
-<<<<<<< HEAD
         write_stream_highlight(df1, out1, diffs1, only_in_1, id_col1)
         write_stream_highlight(df2, out2, diffs2, only_in_2, id_col2)
-=======
-        write_stream_highlight(df1, out1, diffs1, only_in_1)
-        write_stream_highlight(df2, out2, diffs2, only_in_2)
->>>>>>> 61bca3d99e4acd9d624bc19bc83daa869203109f
     except Exception as e:
         print(f"Failed to write highlighted workbooks: {e}")
         return 1
@@ -438,10 +341,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-<<<<<<< HEAD
     sys.exit(main())
-
-
-=======
-    sys.exit(main())
->>>>>>> 61bca3d99e4acd9d624bc19bc83daa869203109f
